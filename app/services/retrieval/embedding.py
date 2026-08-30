@@ -8,6 +8,10 @@ BATCH_SIZE = 50
 _GEMINI_DIM = 3072
 _FALLBACK_DIM = 768
 
+
+_active_model = None
+_model_type: str | None = None 
+
 # Model Intialization
 
 def _probe_gemini():
