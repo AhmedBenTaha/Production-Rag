@@ -5,16 +5,18 @@ from langchain_openai import ChatOpenAI
 
 from app.config import settings
 
+PORTKEY_CONFIG = settings.PORTKEY_CONFIG_SLUG
+
 
 # =========================================================
 # Production Gateway Configuration
 # =========================================================
 #
 # Primary:
-#   llama-3.3-70b-versatile
+#   openai/gpt-oss-120b
 #
 # Fallback:
-#   llama-3.1-8b-instant
+#   openai/gpt-oss-20b
 #
 # Reliability:
 #   - Retry twice on rate-limit / temporary server errors
@@ -33,10 +35,7 @@ GATEWAY_CONFIG = {
         "mode": "fallback",
     },
 
-    "cache": {
-        "mode": "simple",
-    },
-
+    
     "retry": {
         "attempts": 2,
         "on_status_codes": [
@@ -50,7 +49,7 @@ GATEWAY_CONFIG = {
             "override_params": {
                 "model": (
                     f"@{settings.GROQ_SLUG}/"
-                    "llama-3.3-70b-versatile"
+                    "openai/gpt-oss-120b"
                 )
             }
         },
@@ -58,7 +57,7 @@ GATEWAY_CONFIG = {
             "override_params": {
                 "model": (
                     f"@{settings.GROQ_SLUG_2}/"
-                    "llama-3.1-8b-instant"
+                    "openai/gpt-oss-20b"
                 )
             }
         },
@@ -82,49 +81,26 @@ portkey_client = Portkey(
 
 def get_langchain_llm(feature: str = "rag") -> ChatOpenAI:
     """
-    Return a Portkey-backed ChatOpenAI instance.
+    Return a Portkey-backed LangChain LLM.
 
-    Portkey exposes an OpenAI-compatible API endpoint, allowing
-    LangChain's ChatOpenAI to communicate with Groq models through
-    the Portkey gateway.
-
-    Portkey is responsible for:
-        - Model routing
-        - Retry
-        - Fallback
-        - Caching
-        - Gateway-level reliability
-
-    The actual inference is still performed by Groq-hosted models.
+    Routing, fallback, retry, and caching are handled
+    by the Portkey saved configuration.
     """
 
     logfire.info(
         "Initializing Portkey-backed LLM",
         feature=feature,
-        primary_model="llama-3.3-70b-versatile",
-        fallback_model="llama-3.1-8b-instant",
+        config=PORTKEY_CONFIG,
     )
 
     return ChatOpenAI(
         api_key=settings.PORTKEY_API_KEY,
-
-        # Portkey exposes an OpenAI-compatible endpoint.
         base_url=PORTKEY_GATEWAY_URL,
-
-        # Primary model.
-        # Portkey resolves the @slug/model format.
-        model=(
-            f"@{settings.GROQ_SLUG}/"
-            "llama-3.3-70b-versatile"
-        ),
-
+        model=f"@{settings.GROQ_SLUG}/openai/gpt-oss-120b",
         temperature=0,
-
         default_headers=createHeaders(
             api_key=settings.PORTKEY_API_KEY,
-
-            config=GATEWAY_CONFIG,
-
+            config=PORTKEY_CONFIG,
             metadata={
                 "feature": feature,
                 "_user": "rag-system",
@@ -132,8 +108,6 @@ def get_langchain_llm(feature: str = "rag") -> ChatOpenAI:
             },
         ),
     )
-
-
 # =========================================================
 # Cache Status
 # =========================================================
