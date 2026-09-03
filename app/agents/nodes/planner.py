@@ -1,169 +1,87 @@
-from app.agents.state import AgentState
 import logfire
-from app.gateway import get_langchain_llm
+from app.agents.state import AgentState
+from app.gateway import portkey_client, extract_cache_status
 
-llm = get_langchain_llm(feature="planner")
 
-def planner_node(state:AgentState):
+def planner_node(state: AgentState):
     """
-    The Planner determines whether the latest message can be answered
-    conversationally or requires retrieval from the knowledge base.
+    Synthesizes a response using both Documentation Context AND Conversation History.
+    Uses the native Portkey client (not LangChain) so we can read the
+    x-portkey-cache-status response header and surface Cache: Hit in the UI.
     """
-    history=""
+    query = state["current_query"]
+
+    history_str = ""
     for msg in state["messages"][:-1]:
-        role = "User" if msg["role"]=="user" else "Assistant" 
-        history += f"{role}: {msg['content']}\n"
-    user_message = state["messages"][-1]["content"] if state["messages"] else ""
-    
-    prompt = f"""
-You are the Planner Agent of an Enterprise Agentic RAG system.
+        role = "User" if msg["role"] == "user" else "Assistant"
+        history_str += f"{role}: {msg['content']}\n"
 
-Your task is to analyze the ENTIRE conversation history and the latest
-user message, then decide whether the request can be answered from
-conversation context or requires retrieving information from the
-enterprise knowledge base.
+    user_msg = state["messages"][-1]["content"] if state["messages"] else ""
 
-CONVERSATION HISTORY:
-{history}
+    if query == "CONVERSATIONAL":
+        logfire.info("Generating conversational response using memory.")
+        prompt = f"""
+        You are a friendly and helpful Enterprise AI Assistant.
+        Answer the user's latest message using the CONVERSATION HISTORY below.
 
-LATEST USER MESSAGE:
-"{user_message}"
+        CONVERSATION HISTORY:
+        {history_str}
 
---------------------------------------------------
-DECISION RULES
---------------------------------------------------
+        LATEST MESSAGE:
+        "{user_msg}"
+        """
+    else:
+        logfire.info("Generating technical RAG response.")
+        max_context_chars = 25000
+        full_context = ""
 
-1. CONVERSATIONAL
+        for doc in state["documents"]:
+            if len(full_context) + len(doc) < max_context_chars:
+                full_context += doc + "\n\n"
+            else:
+                logfire.warning("Context truncated to fit Groq TPM limits.")
+                break
 
-Return exactly:
+        prompt = f"""
+        You are a Senior Technical Architect.
+        Answer the question using the TECHNICAL CONTEXT provided.
 
-CONVERSATIONAL
+        TECHNICAL CONTEXT:
+        {full_context}
 
-when the latest message:
+        CONVERSATION HISTORY:
+        {history_str}
 
-- Is a greeting, farewell, thanks, or casual conversation.
-- Can be answered completely using information already present in the
-  conversation history.
-- Refers to something explicitly discussed earlier and does not require
-  any external or enterprise knowledge.
+        USER QUESTION:
+        "{user_msg}"
+        """
 
-Examples:
-- "Hi"
-- "Thanks"
-- "What was my previous question?"
-- "Can you explain your last answer again?"
+    with logfire.span("✍️ LLM Synthesis"):
+        try:
+            response = portkey_client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1
+            )
+            content = response.choices[0].message.content
+            cache_status = extract_cache_status(response)
+            is_cache_hit = cache_status == "HIT"
 
---------------------------------------------------
+            if is_cache_hit:
+                logfire.info("⚡ Gateway Cache Hit — response served from Portkey cache.")
+                plan_update = state["plan"] + ["Cache: Hit ⚡"]
+                status = "Cache hit — instant response."
+            else:
+                logfire.info("✅ Response synthesised via LLM.")
+                plan_update = state["plan"]
+                status = "Response generated."
 
-2. KNOWLEDGE RETRIEVAL
+            return {
+                "final_answer": content,
+                "status": status,
+                "plan": plan_update,
+                "messages": [{"role": "assistant", "content": content}]
+            }
 
-If the latest message requires information that may exist in the
-enterprise knowledge base, generate a clear and optimized search query.
-
-This includes:
-
-- Technical questions
-- Company information
-- Internal documentation
-- Policies and procedures
-- Product documentation
-- Troubleshooting
-- Configuration instructions
-- Best practices
-- Incident information
-- Reports
-- Any factual information that cannot be confidently answered from
-  the conversation history alone.
-
-Do NOT restrict retrieval to a specific domain or technology.
-
-The knowledge base may contain information about ANY subject.
-
---------------------------------------------------
-
-3. FOLLOW-UP QUESTIONS
-
-Pay close attention to references such as:
-
-- "What about this?"
-- "How do I configure it?"
-- "Does this apply to them?"
-- "Why did that happen?"
-- "What is the difference?"
-- "Can you explain that?"
-
-Use the conversation history to resolve what the user is referring to.
-
-If the question requires knowledge that is not contained in the
-conversation, generate a retrieval query that includes the necessary
-context from the previous messages.
-
---------------------------------------------------
-
-4. RETRIEVAL PREFERENCE
-
-When uncertain whether the conversation history contains enough
-information to answer the question, ALWAYS prefer retrieval.
-
-Do not assume that information is correct or complete just because
-something similar appeared earlier in the conversation.
-
---------------------------------------------------
-
-5. SEARCH QUERY GENERATION
-
-When retrieval is required:
-
-- Rewrite the user's question into a concise, precise search query.
-- Preserve important entities, technologies, product names, versions,
-  dates, error messages, and constraints.
-- Include relevant context from previous messages when necessary.
-- Remove conversational filler.
-- Do not answer the question.
-- Do not add information that was not provided by the user or found
-  in the conversation.
-
-The generated query should be optimized for semantic and keyword
-retrieval from an enterprise knowledge base.
-
---------------------------------------------------
-OUTPUT FORMAT
---------------------------------------------------
-
-Return ONLY ONE of the following:
-
-CONVERSATIONAL
-
-OR
-
-A refined search query.
-
-Do not include explanations, labels, reasoning, markdown, or additional text.
-
-"""
-    with logfire.span("🧠 Planner Decision"):
-        decision = llm.invoke(prompt).content.strip()
-
-        if decision.upper().rstrip(".") == "CONVERSATIONAL":
-            decision = "CONVERSATIONAL"
-
-        logfire.info(f"Intent identified: {decision}")
-
-    if decision == "CONVERSATIONAL":
-        return {
-            "current_query": "CONVERSATIONAL",
-            "status": "Handling conversationally (using memory)...",
-            "plan": [
-                "Intent: Conversational/Memory",
-                "Retrieval: Skipped"
-            ]
-        }
-
-    return {
-        "current_query": decision,
-        "status": f"Knowledge retrieval needed. Searching for: {decision}",
-        "plan": [
-            "Intent: Knowledge Retrieval",
-            f"Search Term: {decision}"
-        ]
-    }
+        except Exception as e:
+            logfire.error(f"LLM Generation failed: {e}")
+            raise e
