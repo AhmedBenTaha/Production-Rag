@@ -1,7 +1,7 @@
 import logfire
-from app.agents.state import AgentState
-from app.gateway import portkey_client, extract_cache_status
 
+from app.agents.state import AgentState
+from app.gateway import get_langchain_llm, extract_cache_status
 
 
 def generate_node(state: AgentState):
@@ -12,17 +12,31 @@ def generate_node(state: AgentState):
     - Retrieved enterprise knowledge-base context for RAG queries.
     - Intent-aware reasoning for knowledge and decision-support requests.
 
-    Uses the native Portkey client so cache status can be detected
-    and surfaced in the UI.
+    The LLM request is sent through Portkey using the Saved Config.
+
+    Portkey is responsible for:
+    - Model routing
+    - Fallback
+    - Retries
+    - Caching
     """
+
+    # =========================================================
+    # Current Query
+    # =========================================================
 
     query = state["current_query"]
 
-    # Build conversation history
+
+    # =========================================================
+    # Build Conversation History
+    # =========================================================
+
     history_str = ""
 
     for msg in state["messages"][:-1]:
         role = "User" if msg["role"] == "user" else "Assistant"
+
         history_str += f"{role}: {msg['content']}\n"
 
     user_msg = (
@@ -31,9 +45,10 @@ def generate_node(state: AgentState):
         else ""
     )
 
-    # ---------------------------------------------------------
-    # Conversational / Memory response
-    # ---------------------------------------------------------
+
+    # =========================================================
+    # Conversational / Memory Response
+    # =========================================================
 
     if query == "CONVERSATIONAL":
 
@@ -65,9 +80,10 @@ Instructions:
 6. Answer only what the user is asking.
 """
 
-    # ---------------------------------------------------------
-    # Enterprise RAG response
-    # ---------------------------------------------------------
+
+    # =========================================================
+    # Enterprise RAG Response
+    # =========================================================
 
     else:
 
@@ -75,6 +91,8 @@ Instructions:
             "Generating enterprise RAG response."
         )
 
+        # Keep the retrieved context within a reasonable size
+        # to avoid exceeding the model/provider context limits.
         max_context_chars = 25000
 
         full_context = ""
@@ -134,6 +152,7 @@ GROUNDING RULES
    clearly established in the conversation.
 
 3. NEVER fabricate:
+
    - Facts
    - Numbers
    - Dates
@@ -200,12 +219,15 @@ Use the retrieved enterprise evidence to support your response.
 Clearly distinguish between:
 
 FACT:
+
 Information directly supported by the retrieved context.
 
 INFERENCE:
+
 A conclusion derived from multiple pieces of retrieved evidence.
 
 RECOMMENDATION:
+
 A suggested action based on the available evidence.
 
 Never present an inference or recommendation as a documented fact.
@@ -250,37 +272,74 @@ Do not mention:
 Unless the user explicitly asks about the system itself.
 """
 
-    
-    # ---------------------------------------------------------
+
+    # =========================================================
     # LLM Generation
-    # ---------------------------------------------------------
+    # =========================================================
+
     with logfire.span("✍️ LLM Synthesis"):
 
         try:
 
-            response = portkey_client.chat.completions.create(
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                temperature=0.1
+            # Initialize the LangChain LLM through our
+            # Portkey gateway wrapper.
+            #
+            # The Saved Config is applied inside
+            # get_langchain_llm().
+            llm = get_langchain_llm(
+                feature="rag-generation"
             )
 
-            content = response.choices[0].message.content
 
-            # Portkey cache status
+            # =================================================
+            # Generate Response
+            # =================================================
+
+            response = llm.invoke(
+                [
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ]
+            )
+
+
+            # LangChain returns an AIMessage.
+            content = response.content
+
+
+            # =================================================
+            # Cache Status
+            # =================================================
+            #
+            # Depending on the LangChain/Portkey versions,
+            # the raw HTTP response may not be exposed.
+            #
+            # extract_cache_status() safely checks the
+            # available response attributes.
+            #
+
             cache_status = extract_cache_status(response)
+
             is_cache_hit = cache_status == "HIT"
+
+
+            # =================================================
+            # Update Agent State
+            # =================================================
 
             if is_cache_hit:
 
                 logfire.info(
-                    "⚡ Gateway Cache Hit — response served from Portkey cache."
+                    "⚡ Gateway Cache Hit — "
+                    "response served from Portkey cache."
                 )
 
-                plan_update = state["plan"] + ["Cache: Hit ⚡"]
+                plan_update = state["plan"] + [
+                    "Cache: Hit ⚡"
+                ]
+
                 status = "Cache hit — instant response."
 
             else:
@@ -290,7 +349,13 @@ Unless the user explicitly asks about the system itself.
                 )
 
                 plan_update = state["plan"]
+
                 status = "Response generated."
+
+
+            # =================================================
+            # Return Updated State
+            # =================================================
 
             return {
                 "final_answer": content,
@@ -299,10 +364,11 @@ Unless the user explicitly asks about the system itself.
                 "messages": [
                     {
                         "role": "assistant",
-                        "content": content
+                        "content": content,
                     }
-                ]
+                ],
             }
+
 
         except Exception as e:
 
