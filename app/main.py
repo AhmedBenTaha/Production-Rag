@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Response
 from pydantic import BaseModel
 from typing import Optional
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.agents.graph import rag_agent
 
@@ -32,6 +33,16 @@ app = FastAPI(
     title="Enterprise Agentic RAG API"
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:5500",
+        "http://localhost:5500",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---------------------------------------------------------
 # Startup

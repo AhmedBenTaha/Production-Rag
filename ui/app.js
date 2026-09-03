@@ -1,641 +1,2151 @@
-// ==========================================
-// CONFIGURATION
-// ==========================================
-const BACKEND_URL = "http://localhost:8000";
-const THREAD_ID_KEY = "enterprise_ai_thread_id";
+/**
+ * Enterprise AI Copilot - Vanilla JS Application
+ * Modular architecture: State, API, UI, Utils
+ */
 
 // ==========================================
-// STATE MANAGEMENT
+// 1. STATE MANAGEMENT
 // ==========================================
-const state = {
-    threadId: localStorage.getItem(THREAD_ID_KEY) || crypto.randomUUID(),
-    messages: [],
-    isGenerating: false,
-    sidebarOpen: window.innerWidth > 1024,
-    inspectorOpen: window.innerWidth > 1024,
-    currentTab: 'sources',
-    graphZoom: 1
-};
 
-// Persist thread ID
-localStorage.setItem(THREAD_ID_KEY, state.threadId);
+const State = {
+    threadId:
+        localStorage.getItem("nexus_thread_id") ||
+        "default_user",
 
-// ==========================================
-// DOM ELEMENTS
-// ==========================================
-const elements = {
-    systemStatus: document.getElementById('systemStatus'),
-    sidebar: document.getElementById('sidebar'),
-    inspector: document.getElementById('inspector'),
-    chatArea: document.getElementById('chatArea'),
-    heroState: document.getElementById('heroState'),
-    messagesContainer: document.getElementById('messagesContainer'),
-    messageInput: document.getElementById('messageInput'),
-    sendBtn: document.getElementById('sendBtn'),
-    charCounter: document.getElementById('charCounter'),
-    mainStatusOrb: document.getElementById('mainStatusOrb'),
-    jumpToBottom: document.getElementById('jumpToBottom'),
-    graphModal: document.getElementById('graphModal'),
-    graphImage: document.getElementById('graphImage'),
-    graphContainer: document.getElementById('graphContainer'),
-    commandPalette: document.getElementById('commandPalette'),
-    commandInput: document.getElementById('commandInput'),
-    toastContainer: document.getElementById('toastContainer'),
-    conversationList: document.getElementById('conversationList'),
-    tabPanes: {
-        sources: document.getElementById('tab-sources'),
-        activity: document.getElementById('tab-activity'),
-        request: document.getElementById('tab-request')
+    messages: JSON.parse(
+        localStorage.getItem("nexus_messages") || "[]"
+    ),
+
+    theme:
+        localStorage.getItem("nexus_theme") || "dark",
+
+    isProcessing: false,
+
+    save() {
+        localStorage.setItem(
+            "nexus_thread_id",
+            this.threadId
+        );
+
+        localStorage.setItem(
+            "nexus_messages",
+            JSON.stringify(this.messages)
+        );
+
+        localStorage.setItem(
+            "nexus_theme",
+            this.theme
+        );
+    },
+
+    clear() {
+        this.messages = [];
+        this.threadId = this.generateThreadId();
+        this.save();
+    },
+
+    generateThreadId() {
+        return (
+            "thread_" +
+            Math.random()
+                .toString(36)
+                .substring(2, 15)
+        );
+    },
+
+    addMessage(role, content, metadata = {}) {
+        const msg = {
+            id: Date.now().toString(),
+            role,
+            content,
+            timestamp: new Date().toISOString(),
+            ...metadata
+        };
+
+        this.messages.push(msg);
+        this.save();
+
+        return msg;
     }
 };
 
-// ==========================================
-// INITIALIZATION
-// ==========================================
-document.addEventListener('DOMContentLoaded', () => {
-    checkBackendHealth();
-    setupEventListeners();
-    renderMockConversations();
-    autoResizeTextarea();
-    
-    // Check initial screen size
-    if (window.innerWidth <= 1024) {
-        state.sidebarOpen = false;
-        state.inspectorOpen = false;
-    }
-});
 
 // ==========================================
-// API FUNCTIONS
+// 2. API CLIENT
 // ==========================================
-async function checkBackendHealth() {
-    updateSystemStatus('checking', 'Checking System...');
-    try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3000);
-        
-        const response = await fetch(`${BACKEND_URL}/`, { signal: controller.signal });
-        clearTimeout(timeoutId);
-        
-        if (response.ok) {
-            updateSystemStatus('online', 'System Online');
-        } else {
-            throw new Error('HTTP ' + response.status);
-        }
-    } catch (error) {
-        updateSystemStatus('offline', 'Backend Offline');
-        showToast('Unable to reach the AI backend. Check that the FastAPI server is running.', 'error');
-    }
-}
 
-async function sendMessage(queryText = null) {
-    const text = queryText || elements.messageInput.value.trim();
-    if (!text || state.isGenerating) return;
+const API = {
 
-    // Update UI
-    elements.messageInput.value = '';
-    autoResizeTextarea();
-    elements.heroState.style.display = 'none';
-    state.isGenerating = true;
-    elements.sendBtn.disabled = true;
-    
-    // Add user message
-    addMessage('user', text);
-    updateCharCounter();
-    
-    // Show loading state
-    const loadingId = showLoadingState();
-    updateOrbState('thinking');
-    
-    // Cycle through loading messages
-    const loadingMessages = [
-        "Agent is analyzing...",
-        "Searching knowledge...",
-        "Reranking evidence...",
-        "Generating response..."
-    ];
-    let msgIndex = 0;
-    const loadingInterval = setInterval(() => {
-        msgIndex = (msgIndex + 1) % loadingMessages.length;
-        updateLoadingText(loadingId, loadingMessages[msgIndex]);
-        if (msgIndex === 1) updateOrbState('retrieving');
-        if (msgIndex === 3) updateOrbState('thinking');
-    }, 800);
+    /*
+     * IMPORTANT:
+     * The frontend is running on:
+     *
+     * http://127.0.0.1:5500
+     *
+     * while FastAPI is running on:
+     *
+     * http://127.0.0.1:8000
+     *
+     * Therefore requests MUST go to port 8000.
+     */
+    baseURL: "http://127.0.0.1:8000",
 
-    try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
-        
-        const startTime = performance.now();
-        const response = await fetch(`${BACKEND_URL}/query`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                q: text,
-                thread_id: state.threadId
-            }),
-            signal: controller.signal
-        });
-        clearTimeout(timeoutId);
-        
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-        
-        const data = await response.json();
-        const responseTime = Math.round(performance.now() - startTime);
-        
-        clearInterval(loadingInterval);
-        removeLoadingState(loadingId);
-        updateOrbState('idle');
-        
-        // Process response
-        addMessage('assistant', data.answer, {
-            thoughtProcess: data.thought_process || [],
-            status: data.status || 'Response generated.',
-            sources: data.sources || [],
-            responseTime: responseTime,
-            query: text
-        });
-        
-        updateInspector(data, responseTime);
-        state.isGenerating = false;
-        elements.sendBtn.disabled = false;
-        elements.messageInput.focus();
-        
-    } catch (error) {
-        clearInterval(loadingInterval);
-        removeLoadingState(loadingId);
-        updateOrbState('error');
-        state.isGenerating = false;
-        elements.sendBtn.disabled = false;
-        
-        let errorMsg = "An unexpected error occurred.";
-        if (error.name === 'AbortError') {
-            errorMsg = "Request timed out. The backend may be overloaded.";
-        } else if (error.message.includes('Failed to fetch')) {
-            errorMsg = "Unable to reach the AI backend. Check your connection.";
-        } else {
-            errorMsg = error.message;
-        }
-        
-        addMessage('assistant', `⚠️ **Error**: ${errorMsg}\n\nPlease try again or check system status.`, {
-            status: 'Error',
-            isError: true
-        });
-        showToast(errorMsg, 'error');
-    }
-}
+    async checkHealth() {
+        try {
+            const res = await fetch(
+                `${this.baseURL}/`
+            );
 
-// ==========================================
-// UI RENDERING FUNCTIONS
-// ==========================================
-function addMessage(role, content, metadata = {}) {
-    const msgDiv = document.createElement('div');
-    msgDiv.className = `message ${role}`;
-    
-    const avatar = document.createElement('div');
-    avatar.className = 'message-avatar';
-    avatar.textContent = role === 'user' ? 'You' : 'AI';
-    
-    const contentDiv = document.createElement('div');
-    contentDiv.className = 'message-content';
-    
-    const bubble = document.createElement('div');
-    bubble.className = 'message-bubble';
-    
-    if (role === 'assistant') {
-        bubble.innerHTML = parseMarkdown(content);
-        
-        // Add code copy listeners
-        bubble.querySelectorAll('pre').forEach(pre => {
-            const btn = document.createElement('button');
-            btn.className = 'copy-code-btn';
-            btn.textContent = 'Copy';
-            btn.onclick = () => {
-                copyToClipboard(pre.querySelector('code').textContent);
-                btn.textContent = 'Copied!';
-                setTimeout(() => btn.textContent = 'Copy', 2000);
-            };
-            pre.appendChild(btn);
-        });
-        
-        // Footer with actions
-        const footer = document.createElement('div');
-        footer.className = 'message-footer';
-        
-        const isGrounded = !metadata.isError && metadata.status !== 'Blocked by guardrails.';
-        const statusBadge = document.createElement('span');
-        statusBadge.className = 'status-badge';
-        statusBadge.innerHTML = isGrounded ? '✓ Grounded response' : '⚠️ ' + metadata.status;
-        footer.appendChild(statusBadge);
-        
-        if (!metadata.isError) {
-            footer.innerHTML += `
-                <button class="action-btn" onclick="copyToClipboard(this.closest('.message').querySelector('.markdown-body').innerText)">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                    Copy
-                </button>
-                <button class="action-btn" onclick="showToast('Regeneration not implemented in demo', 'success')">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-                    Regenerate
-                </button>
-                <button class="action-btn" onclick="showToast('Feedback recorded', 'success')">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>
-                    Useful
-                </button>
-            `;
-        }
-        contentDiv.appendChild(footer);
-    } else {
-        bubble.textContent = content;
-    }
-    
-    contentDiv.insertBefore(bubble, contentDiv.firstChild);
-    msgDiv.appendChild(avatar);
-    msgDiv.appendChild(contentDiv);
-    
-    elements.messagesContainer.appendChild(msgDiv);
-    scrollToBottom();
-    
-    // Store in state
-    state.messages.push({ role, content, metadata });
-}
-
-function showLoadingState() {
-    const id = 'loading-' + Date.now();
-    const msgDiv = document.createElement('div');
-    msgDiv.className = 'message assistant';
-    msgDiv.id = id;
-    msgDiv.innerHTML = `
-        <div class="message-avatar">AI</div>
-        <div class="message-content">
-            <div class="message-bubble">
-                <div class="shimmer" style="height: 20px; width: 80%; margin-bottom: 10px;"></div>
-                <div class="shimmer" style="height: 20px; width: 60%; margin-bottom: 10px;"></div>
-                <div class="shimmer" style="height: 20px; width: 90%;"></div>
-                <div style="margin-top: 1rem; font-size: 0.85rem; color: var(--accent-primary);" class="loading-text">
-                    Agent is analyzing...
-                </div>
-            </div>
-        </div>
-    `;
-    elements.messagesContainer.appendChild(msgDiv);
-    scrollToBottom();
-    return id;
-}
-
-function updateLoadingText(id, text) {
-    const el = document.getElementById(id);
-    if (el) {
-        el.querySelector('.loading-text').textContent = text;
-    }
-}
-
-function removeLoadingState(id) {
-    const el = document.getElementById(id);
-    if (el) el.remove();
-}
-
-function updateInspector(data, responseTime) {
-    // Sources Tab
-    if (data.sources && data.sources.length > 0) {
-        elements.tabPanes.sources.innerHTML = data.sources.map((source, idx) => `
-            <div class="source-card">
-                <div class="source-header">
-                    <span class="source-id">Source ${String(idx + 1).padStart(2, '0')}</span>
-                    <button class="icon-btn-sm" onclick="copyToClipboard(\`${source.replace(/`/g, '\\`')}\`)" title="Copy source">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                    </button>
-                </div>
-                <div class="source-content" onclick="this.classList.toggle('expanded')">
-                    ${source}
-                </div>
-            </div>
-        `).join('');
-    } else {
-        elements.tabPanes.sources.innerHTML = '<div class="empty-state-small">No knowledge sources were required for this response.</div>';
-    }
-    
-    // Activity Tab
-    if (data.thought_process && data.thought_process.length > 0) {
-        elements.tabPanes.activity.innerHTML = data.thought_process.map((step, idx) => `
-            <div class="agent-step ${idx < data.thought_process.length - 1 ? 'completed' : 'active'}">
-                <div>
-                    <div class="step-label">${step}</div>
-                </div>
-            </div>
-        `).join('');
-    } else {
-        elements.tabPanes.activity.innerHTML = '<div class="empty-state-small">No agent activity trace available.</div>';
-    }
-    
-    // Request Info Tab
-    elements.tabPanes.request.innerHTML = `
-        <div class="request-info-row">
-            <span class="label">Query</span>
-            <span class="value">${data.question || 'N/A'}</span>
-        </div>
-        <div class="request-info-row">
-            <span class="label">Thread ID</span>
-            <span class="value">${state.threadId}</span>
-        </div>
-        <div class="request-info-row">
-            <span class="label">Status</span>
-            <span class="value" style="color: ${data.status === 'Blocked by guardrails.' ? 'var(--error)' : 'var(--success)'}">${data.status}</span>
-        </div>
-        <div class="request-info-row">
-            <span class="label">Response Time</span>
-            <span class="value">${responseTime}ms</span>
-        </div>
-        <div class="request-info-row">
-            <span class="label">Sources</span>
-            <span class="value">${data.sources ? data.sources.length : 0}</span>
-        </div>
-        <div class="request-info-row">
-            <span class="label">Agent State</span>
-            <span class="value">Idle</span>
-        </div>
-    `;
-    
-    // Switch to sources tab if there are sources, else activity
-    if (data.sources && data.sources.length > 0) {
-        switchTab('sources');
-    } else {
-        switchTab('activity');
-    }
-}
-
-// ==========================================
-// MARKDOWN PARSER (Lightweight)
-// ==========================================
-function parseMarkdown(text) {
-    if (!text) return '';
-    
-    let html = text
-        // Escape HTML
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        // Code blocks
-        .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="language-$1">$2</code></pre>')
-        // Inline code
-        .replace(/`([^`]+)`/g, '<code>$1</code>')
-        // Bold
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-        // Italic
-        .replace(/\*(.*?)\*/g, '<em>$1</em>')
-        // Headings
-        .replace(/^### (.*$)/gim, '<h3>$1</h3>')
-        .replace(/^## (.*$)/gim, '<h2>$1</h2>')
-        .replace(/^# (.*$)/gim, '<h1>$1</h1>')
-        // Unordered lists
-        .replace(/^\s*[-*+]\s+(.*$)/gim, '<li>$1</li>')
-        // Ordered lists
-        .replace(/^\s*\d+\.\s+(.*$)/gim, '<li>$1</li>')
-        // Wrap consecutive lis in ul
-        .replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>')
-        // Paragraphs (simple)
-        .replace(/\n\n/g, '</p><p>')
-        .replace(/\n/g, '<br>');
-    
-    return `<div class="markdown-body"><p>${html}</p></div>`;
-}
-
-// ==========================================
-// UTILITY FUNCTIONS
-// ==========================================
-function copyToClipboard(text) {
-    navigator.clipboard.writeText(text).then(() => {
-        showToast('Copied to clipboard', 'success');
-    }).catch(() => {
-        showToast('Failed to copy', 'error');
-    });
-}
-
-function showToast(message, type = 'success') {
-    const toast = document.createElement('div');
-    toast.className = `toast ${type}`;
-    toast.innerHTML = `
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            ${type === 'success' 
-                ? '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline>'
-                : '<circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line>'}
-        </svg>
-        <span>${message}</span>
-    `;
-    elements.toastContainer.appendChild(toast);
-    setTimeout(() => {
-        toast.style.opacity = '0';
-        toast.style.transform = 'translateX(20px)';
-        setTimeout(() => toast.remove(), 300);
-    }, 3000);
-}
-
-function updateSystemStatus(status, text) {
-    const dot = elements.systemStatus.querySelector('.status-dot');
-    const txt = elements.systemStatus.querySelector('.status-text');
-    dot.className = `status-dot ${status}`;
-    txt.textContent = text;
-}
-
-function updateOrbState(stateName) {
-    elements.mainStatusOrb.className = `status-orb ${stateName}`;
-}
-
-function switchTab(tabName) {
-    state.currentTab = tabName;
-    document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.tab === tabName);
-    });
-    Object.values(elements.tabPanes).forEach(pane => {
-        pane.classList.remove('active');
-    });
-    if (elements.tabPanes[tabName]) {
-        elements.tabPanes[tabName].classList.add('active');
-    }
-}
-
-function scrollToBottom() {
-    elements.messagesContainer.scrollTop = elements.messagesContainer.scrollHeight;
-}
-
-function autoResizeTextarea() {
-    elements.messageInput.style.height = 'auto';
-    elements.messageInput.style.height = Math.min(elements.messageInput.scrollHeight, 200) + 'px';
-}
-
-function updateCharCounter() {
-    const len = elements.messageInput.value.length;
-    elements.charCounter.textContent = `${len}/2000`;
-    elements.charCounter.style.color = len > 1800 ? 'var(--error)' : 'var(--text-muted)';
-}
-
-function clearConversation() {
-    if (confirm('Are you sure you want to clear this conversation?')) {
-        state.messages = [];
-        elements.messagesContainer.innerHTML = '';
-        elements.heroState.style.display = 'flex';
-        // Reset inspector
-        elements.tabPanes.sources.innerHTML = '<div class="empty-state-small">No knowledge sources retrieved yet.</div>';
-        elements.tabPanes.activity.innerHTML = '<div class="empty-state-small">Agent activity trace will appear here.</div>';
-        elements.tabPanes.request.innerHTML = '<div class="empty-state-small">Request metadata will appear here.</div>';
-        showToast('Conversation cleared', 'success');
-    }
-}
-
-function renderMockConversations() {
-    const mocks = [
-        { icon: '🔍', title: 'Knowledge Search', time: '2m ago' },
-        { icon: '🔧', title: 'System Troubleshooting', time: '1h ago' },
-        { icon: '📜', title: 'Policy Analysis', time: '3h ago' },
-        { icon: '📄', title: 'Technical Documentation', time: '1d ago' }
-    ];
-    elements.conversationList.innerHTML = mocks.map((m, i) => `
-        <div class="conv-item ${i === 0 ? 'active' : ''}">
-            <span>${m.icon}</span>
-            <div style="flex: 1; overflow: hidden;">
-                <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${m.title}</div>
-                <div style="font-size: 0.75rem; color: var(--text-muted);">${m.time}</div>
-            </div>
-        </div>
-    `).join('');
-}
-
-// ==========================================
-// EVENT LISTENERS
-// ==========================================
-function setupEventListeners() {
-    // Input handling
-    elements.messageInput.addEventListener('input', () => {
-        autoResizeTextarea();
-        updateCharCounter();
-    });
-    
-    elements.messageInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            sendMessage();
-        }
-    });
-    
-    elements.sendBtn.addEventListener('click', () => sendMessage());
-    
-    // Suggestion cards
-    document.querySelectorAll('.suggestion-card').forEach(card => {
-        card.addEventListener('click', () => {
-            sendMessage(card.dataset.query);
-        });
-    });
-    
-    // Scroll handling
-    elements.messagesContainer.addEventListener('scroll', () => {
-        const { scrollTop, scrollHeight, clientHeight } = elements.messagesContainer;
-        if (scrollHeight - scrollTop - clientHeight > 200) {
-            elements.jumpToBottom.classList.add('visible');
-        } else {
-            elements.jumpToBottom.classList.remove('visible');
- }
-    });
-    
-    elements.jumpToBottom.addEventListener('click', scrollToBottom);
-    
-    // Sidebar & Inspector toggles
-    document.getElementById('toggleSidebar').addEventListener('click', () => {
-        state.sidebarOpen = !state.sidebarOpen;
-        elements.sidebar.classList.toggle('open', state.sidebarOpen);
-    });
-    
-    document.getElementById('toggleInspector').addEventListener('click', () => {
-        state.inspectorOpen = !state.inspectorOpen;
-        elements.inspector.classList.toggle('open', state.inspectorOpen);
-    });
-    
-    document.getElementById('newChatBtn').addEventListener('click', () => {
-        state.threadId = crypto.randomUUID();
-        localStorage.setItem(THREAD_ID_KEY, state.threadId);
-        clearConversation();
-        showToast('New conversation started', 'success');
-    });
-    
-    document.getElementById('clearChatBtn').addEventListener('click', clearConversation);
-    
-    // Tabs
-    document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.addEventListener('click', () => switchTab(btn.dataset.tab));
-    });
-    
-    // Graph Modal
-    document.getElementById('viewGraphBtn').addEventListener('click', openGraphModal);
-    document.querySelectorAll('.close-modal').forEach(btn => {
-        btn.addEventListener('click', () => {
-            elements.graphModal.classList.remove('active');
-            elements.commandPalette.classList.remove('active');
-        });
-    });
-    
-    document.getElementById('zoomIn').addEventListener('click', () => {
-        state.graphZoom = Math.min(state.graphZoom + 0.2, 3);
-        elements.graphImage.style.transform = `scale(${state.graphZoom})`;
-    });
-    
-    document.getElementById('zoomOut').addEventListener('click', () => {
-        state.graphZoom = Math.max(state.graphZoom - 0.2, 0.5);
-        elements.graphImage.style.transform = `scale(${state.graphZoom})`;
-    });
-    
-    document.getElementById('zoomReset').addEventListener('click', () => {
-        state.graphZoom = 1;
-        elements.graphImage.style.transform = `scale(1)`;
-    });
-    
-    // Command Palette
-    document.addEventListener('keydown', (e) => {
-        if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-            e.preventDefault();
-            openCommandPalette();
-        }
-        if (e.key === 'Escape') {
-            elements.graphModal.classList.remove('active');
-            elements.commandPalette.classList.remove('active');
-        }
-    });
-    
-    document.querySelectorAll('.command-item').forEach(item => {
-        item.addEventListener('click', () => {
-            const action = item.dataset.action;
-            elements.commandPalette.classList.remove('active');
-            
-            switch(action) {
-                case 'newChat': document.getElementById('newChatBtn').click(); break;
-                case 'clearChat': clearConversation(); break;
-                case 'toggleSidebar': document.getElementById('toggleSidebar').click(); break;
-                case 'toggleInspector': document.getElementById('toggleInspector').click(); break;
-                case 'viewGraph': openGraphModal(); break;
-                case 'focusInput': elements.messageInput.focus(); break;
+            if (!res.ok) {
+                throw new Error(
+                    `Health check failed: HTTP ${res.status}`
+                );
             }
+
+            const data = await res.json();
+
+            UI.updateConnectionStatus(true);
+
+            return data;
+
+        } catch (err) {
+
+            UI.updateConnectionStatus(false);
+
+            console.error(
+                "Health check failed:",
+                err
+            );
+
+            throw err;
+        }
+    },
+
+
+    async queryRAG(question) {
+
+        const payload = {
+            q: question,
+            thread_id: State.threadId
+        };
+
+        console.log(
+            "Sending request to backend:",
+            payload
+        );
+
+        try {
+
+            const response = await fetch(
+                `${this.baseURL}/query`,
+                {
+                    method: "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+
+                    body: JSON.stringify(payload)
+                }
+            );
+
+            if (!response.ok) {
+
+                let errorMessage =
+                    `HTTP ${response.status}: ${response.statusText}`;
+
+                try {
+
+                    const errorData =
+                        await response.json();
+
+                    if (errorData.detail) {
+                        errorMessage =
+                            typeof errorData.detail ===
+                            "string"
+                                ? errorData.detail
+                                : JSON.stringify(
+                                      errorData.detail
+                                  );
+                    }
+
+                } catch (_) {
+                    // Ignore JSON parsing errors
+                }
+
+                throw new Error(errorMessage);
+            }
+
+            const data =
+                await response.json();
+
+            console.log(
+                "Backend response:",
+                data
+            );
+
+            if (data.status === "error") {
+
+                throw new Error(
+                    data.answer ||
+                    "Internal server error occurred"
+                );
+            }
+
+            return data;
+
+        } catch (err) {
+
+            console.error(
+                "RAG request failed:",
+                err
+            );
+
+            throw err;
+        }
+    },
+
+
+    async getGraphImage() {
+
+        const response =
+            await fetch(
+                `${this.baseURL}/graph`
+            );
+
+        if (!response.ok) {
+
+            throw new Error(
+                `Failed to fetch graph: HTTP ${response.status}`
+            );
+        }
+
+        const blob =
+            await response.blob();
+
+        return URL.createObjectURL(blob);
+    }
+};
+
+
+// ==========================================
+// 3. UI CONTROLLER
+// ==========================================
+
+const UI = {
+
+    elements: {
+
+        chatContainer:
+            document.getElementById(
+                "chat-container"
+            ),
+
+        messagesList:
+            document.getElementById(
+                "messages-list"
+            ),
+
+        welcomeScreen:
+            document.getElementById(
+                "welcome-screen"
+            ),
+
+        loadingIndicator:
+            document.getElementById(
+                "loading-indicator"
+            ),
+
+        messageInput:
+            document.getElementById(
+                "message-input"
+            ),
+
+        sendBtn:
+            document.getElementById(
+                "send-btn"
+            ),
+
+        charCounter:
+            document.getElementById(
+                "char-counter"
+            ),
+
+        sidebar:
+            document.getElementById(
+                "sidebar"
+            ),
+
+        sidebarOverlay:
+            document.getElementById(
+                "sidebar-overlay"
+            ),
+
+        threadList:
+            document.getElementById(
+                "thread-list"
+            ),
+
+        toastContainer:
+            document.getElementById(
+                "toast-container"
+            ),
+
+        currentThreadIdDisplay:
+            document.getElementById(
+                "current-thread-id"
+            )
+    },
+
+
+    init() {
+
+        this.applyTheme(
+            State.theme
+        );
+
+        this.renderMessages();
+
+        this.updateThreadIdDisplay();
+
+        this.setupEventListeners();
+
+        this.setupMarkdown();
+
+        // Initial health check
+        API.checkHealth().catch(() => {
+
+            this.showToast(
+                "Unable to reach the AI service. Check backend.",
+                "error"
+            );
         });
-    });
-    
-    // Close modals on outside click
-    elements.graphModal.addEventListener('click', (e) => {
-        if (e.target === elements.graphModal) elements.graphModal.classList.remove('active');
-    });
-    elements.commandPalette.addEventListener('click', (e) => {
-        if (e.target === elements.commandPalette) elements.commandPalette.classList.remove('active');
-    });
-}
+    },
 
-function openGraphModal() {
-    elements.graphImage.src = `${BACKEND_URL}/graph?t=${Date.now()}`;
-    state.graphZoom = 1;
-    elements.graphImage.style.transform = 'scale(1)';
-    elements.graphModal.classList.add('active');
-    showToast('Agent graph loaded', 'success');
-}
 
-function openCommandPalette() {
-    elements.commandPalette.classList.add('active');
-    elements.commandInput.value = '';
-    elements.commandInput.focus();
-}
+    setupMarkdown() {
+
+        if (typeof marked === "undefined") {
+
+            console.warn(
+                "Marked.js is not loaded."
+            );
+
+            return;
+        }
+
+        marked.setOptions({
+
+            highlight: function (
+                code,
+                lang
+            ) {
+
+                if (
+                    typeof hljs ===
+                    "undefined"
+                ) {
+                    return code;
+                }
+
+                const language =
+                    hljs.getLanguage(lang)
+                        ? lang
+                        : "plaintext";
+
+                return hljs.highlight(
+                    code,
+                    {
+                        language
+                    }
+                ).value;
+            },
+
+            langPrefix:
+                "hljs language-"
+        });
+    },
+
+
+    setupEventListeners() {
+
+        // ======================================
+        // Input auto-grow & validation
+        // ======================================
+
+        if (
+            this.elements.messageInput
+        ) {
+
+            this.elements.messageInput
+                .addEventListener(
+                    "input",
+                    () => {
+
+                        this.autoGrowTextarea(
+                            this.elements
+                                .messageInput
+                        );
+
+                        const len =
+                            this.elements
+                                .messageInput
+                                .value.length;
+
+                        this.elements
+                            .charCounter
+                            .textContent = len;
+
+                        this.elements
+                            .sendBtn
+                            .disabled =
+                            len === 0 ||
+                            State.isProcessing;
+                    }
+                );
+
+
+            // Enter to send
+            // Shift + Enter = newline
+
+            this.elements.messageInput
+                .addEventListener(
+                    "keydown",
+                    (e) => {
+
+                        if (
+                            e.key === "Enter" &&
+                            !e.shiftKey
+                        ) {
+
+                            e.preventDefault();
+
+                            this.handleSend();
+                        }
+                    }
+                );
+        }
+
+
+        // ======================================
+        // Send button
+        // ======================================
+
+        if (this.elements.sendBtn) {
+
+            this.elements.sendBtn
+                .addEventListener(
+                    "click",
+                    () => this.handleSend()
+                );
+        }
+
+
+        // ======================================
+        // Sidebar
+        // ======================================
+
+        const toggleSidebar =
+            document.getElementById(
+                "toggle-sidebar"
+            );
+
+        if (toggleSidebar) {
+
+            toggleSidebar.addEventListener(
+                "click",
+                () =>
+                    this.toggleSidebar(true)
+            );
+        }
+
+
+        const closeSidebarMobile =
+            document.getElementById(
+                "close-sidebar-mobile"
+            );
+
+        if (closeSidebarMobile) {
+
+            closeSidebarMobile
+                .addEventListener(
+                    "click",
+                    () =>
+                        this.toggleSidebar(
+                            false
+                        )
+                );
+        }
+
+
+        if (
+            this.elements
+                .sidebarOverlay
+        ) {
+
+            this.elements
+                .sidebarOverlay
+                .addEventListener(
+                    "click",
+                    () =>
+                        this.toggleSidebar(
+                            false
+                        )
+                );
+        }
+
+
+        // ======================================
+        // New Chat
+        // ======================================
+
+        const newChatBtn =
+            document.getElementById(
+                "new-chat-btn"
+            );
+
+        if (newChatBtn) {
+
+            newChatBtn.addEventListener(
+                "click",
+                () => {
+
+                    State.clear();
+
+                    this.renderMessages();
+
+                    this.updateThreadIdDisplay();
+
+                    this.showToast(
+                        "New conversation started",
+                        "success"
+                    );
+
+                    if (
+                        window.innerWidth <=
+                        768
+                    ) {
+
+                        this.toggleSidebar(
+                            false
+                        );
+                    }
+                }
+            );
+        }
+
+
+        // ======================================
+        // Clear History
+        // ======================================
+
+        const clearHistoryBtn =
+            document.getElementById(
+                "clear-history-btn"
+            );
+
+        if (clearHistoryBtn) {
+
+            clearHistoryBtn
+                .addEventListener(
+                    "click",
+                    () => {
+
+                        State.clear();
+
+                        this.renderMessages();
+
+                        this.updateThreadIdDisplay();
+
+                        this.showToast(
+                            "Local history cleared",
+                            "success"
+                        );
+                    }
+                );
+        }
+
+
+        // ======================================
+        // Theme Toggle
+        // ======================================
+
+        const themeToggle =
+            document.getElementById(
+                "theme-toggle"
+            );
+
+        if (themeToggle) {
+
+            themeToggle.addEventListener(
+                "click",
+                () => {
+
+                    const newTheme =
+                        State.theme === "dark"
+                            ? "light"
+                            : "dark";
+
+                    State.theme =
+                        newTheme;
+
+                    State.save();
+
+                    this.applyTheme(
+                        newTheme
+                    );
+
+                    const themeSelect =
+                        document.getElementById(
+                            "theme-select"
+                        );
+
+                    if (themeSelect) {
+                        themeSelect.value =
+                            newTheme;
+                    }
+                }
+            );
+        }
+
+
+        const themeSelect =
+            document.getElementById(
+                "theme-select"
+            );
+
+        if (themeSelect) {
+
+            themeSelect.addEventListener(
+                "change",
+                (e) => {
+
+                    State.theme =
+                        e.target.value;
+
+                    State.save();
+
+                    this.applyTheme(
+                        State.theme
+                    );
+                }
+            );
+        }
+
+
+        // ======================================
+        // Settings Modal
+        // ======================================
+
+        const settingsModal =
+            document.getElementById(
+                "settings-modal"
+            );
+
+        const settingsBtn =
+            document.getElementById(
+                "settings-btn"
+            );
+
+        if (
+            settingsBtn &&
+            settingsModal
+        ) {
+
+            settingsBtn.addEventListener(
+                "click",
+                () => {
+
+                    settingsModal.classList
+                        .remove("hidden");
+
+                    settingsModal.setAttribute(
+                        "aria-hidden",
+                        "false"
+                    );
+                }
+            );
+
+            this.setupModalClose(
+                settingsModal
+            );
+        }
+
+
+        // ======================================
+        // Graph Modal
+        // ======================================
+
+        const graphModal =
+            document.getElementById(
+                "graph-modal"
+            );
+
+        const viewGraphBtn =
+            document.getElementById(
+                "view-graph-btn"
+            );
+
+        if (
+            viewGraphBtn &&
+            graphModal
+        ) {
+
+            viewGraphBtn.addEventListener(
+                "click",
+                async () => {
+
+                    graphModal.classList
+                        .remove("hidden");
+
+                    graphModal.setAttribute(
+                        "aria-hidden",
+                        "false"
+                    );
+
+                    const container =
+                        document.getElementById(
+                            "graph-container"
+                        );
+
+                    if (!container) {
+                        return;
+                    }
+
+                    container.innerHTML =
+                        "<p>Loading graph visualization...</p>";
+
+                    try {
+
+                        const imgUrl =
+                            await API.getGraphImage();
+
+                        container.innerHTML = `
+                            <img
+                                src="${imgUrl}"
+                                alt="LangGraph Architecture"
+                            >
+                        `;
+
+                    } catch (err) {
+
+                        console.error(
+                            "Graph loading failed:",
+                            err
+                        );
+
+                        container.innerHTML =
+                            `
+                            <p style="color: var(--error)">
+                                Failed to load graph.
+                                Ensure backend is running.
+                            </p>
+                            `;
+                    }
+                }
+            );
+
+            this.setupModalClose(
+                graphModal
+            );
+        }
+
+
+        // ======================================
+        // Regenerate Thread
+        // ======================================
+
+        const regenerateThreadBtn =
+            document.getElementById(
+                "regenerate-thread-btn"
+            );
+
+        if (
+            regenerateThreadBtn
+        ) {
+
+            regenerateThreadBtn
+                .addEventListener(
+                    "click",
+                    () => {
+
+                        State.threadId =
+                            State.generateThreadId();
+
+                        State.save();
+
+                        this.updateThreadIdDisplay();
+
+                        this.showToast(
+                            "New thread ID generated",
+                            "success"
+                        );
+                    }
+                );
+        }
+
+
+        // ======================================
+        // Clear All Data
+        // ======================================
+
+        const clearAllDataBtn =
+            document.getElementById(
+                "clear-all-data-btn"
+            );
+
+        if (clearAllDataBtn) {
+
+            clearAllDataBtn
+                .addEventListener(
+                    "click",
+                    () => {
+
+                        if (
+                            confirm(
+                                "Are you sure? This will delete all local conversations and settings."
+                            )
+                        ) {
+
+                            localStorage.clear();
+
+                            location.reload();
+                        }
+                    }
+                );
+        }
+
+
+        // ======================================
+        // Suggestion Cards
+        // ======================================
+
+        document
+            .querySelectorAll(
+                ".suggestion-card"
+            )
+            .forEach((card) => {
+
+                card.addEventListener(
+                    "click",
+                    () => {
+
+                        const query =
+                            card.getAttribute(
+                                "data-query"
+                            );
+
+                        if (
+                            !query ||
+                            !this.elements
+                                .messageInput
+                        ) {
+                            return;
+                        }
+
+                        this.elements
+                            .messageInput
+                            .value = query;
+
+                        this.elements
+                            .messageInput
+                            .dispatchEvent(
+                                new Event(
+                                    "input"
+                                )
+                            );
+
+                        this.handleSend();
+                    }
+                );
+            });
+
+
+        // ======================================
+        // Window Resize
+        // ======================================
+
+        window.addEventListener(
+            "resize",
+            () => {
+
+                if (
+                    window.innerWidth >
+                    768
+                ) {
+
+                    if (
+                        this.elements
+                            .sidebarOverlay
+                    ) {
+
+                        this.elements
+                            .sidebarOverlay
+                            .classList
+                            .remove(
+                                "active"
+                            );
+                    }
+
+                    if (
+                        this.elements
+                            .sidebar
+                    ) {
+
+                        this.elements
+                            .sidebar
+                            .classList
+                            .remove(
+                                "open"
+                            );
+                    }
+                }
+            }
+        );
+    },
+
+
+    setupModalClose(modal) {
+
+        if (!modal) {
+            return;
+        }
+
+        const closeBtn =
+            modal.querySelector(
+                ".close-modal"
+            );
+
+        if (closeBtn) {
+
+            closeBtn.addEventListener(
+                "click",
+                () => {
+
+                    modal.classList.add(
+                        "hidden"
+                    );
+
+                    modal.setAttribute(
+                        "aria-hidden",
+                        "true"
+                    );
+                }
+            );
+        }
+
+
+        modal.addEventListener(
+            "click",
+            (e) => {
+
+                if (
+                    e.target === modal
+                ) {
+
+                    modal.classList.add(
+                        "hidden"
+                    );
+
+                    modal.setAttribute(
+                        "aria-hidden",
+                        "true"
+                    );
+                }
+            }
+        );
+    },
+
+
+    applyTheme(theme) {
+
+        if (theme === "system") {
+
+            const prefersDark =
+                window.matchMedia(
+                    "(prefers-color-scheme: dark)"
+                ).matches;
+
+            document.documentElement
+                .setAttribute(
+                    "data-theme",
+                    prefersDark
+                        ? "dark"
+                        : "light"
+                );
+
+        } else {
+
+            document.documentElement
+                .setAttribute(
+                    "data-theme",
+                    theme
+                );
+        }
+    },
+
+
+    toggleSidebar(
+        forceOpen = null
+    ) {
+
+        const isMobile =
+            window.innerWidth <= 768;
+
+        if (isMobile) {
+
+            if (
+                forceOpen === true ||
+                !this.elements
+                    .sidebar
+                    .classList
+                    .contains("open")
+            ) {
+
+                this.elements
+                    .sidebar
+                    .classList
+                    .add("open");
+
+                this.elements
+                    .sidebarOverlay
+                    .classList
+                    .add("active");
+
+            } else {
+
+                this.elements
+                    .sidebar
+                    .classList
+                    .remove("open");
+
+                this.elements
+                    .sidebarOverlay
+                    .classList
+                    .remove(
+                        "active"
+                    );
+            }
+
+        } else {
+
+            this.elements
+                .sidebar
+                .classList
+                .toggle(
+                    "collapsed"
+                );
+        }
+    },
+
+
+    autoGrowTextarea(el) {
+
+        if (!el) {
+            return;
+        }
+
+        el.style.height = "auto";
+
+        el.style.height =
+            Math.min(
+                el.scrollHeight,
+                200
+            ) + "px";
+    },
+
+
+    // ======================================
+    // SEND QUERY
+    // ======================================
+
+    async handleSend() {
+
+        const input =
+            this.elements.messageInput;
+
+        if (!input) {
+            return;
+        }
+
+        const query =
+            input.value.trim();
+
+        if (
+            !query ||
+            State.isProcessing
+        ) {
+            return;
+        }
+
+
+        // ======================================
+        // Add user message
+        // ======================================
+
+        State.addMessage(
+            "user",
+            query
+        );
+
+        this.renderMessages();
+
+
+        // ======================================
+        // Clear input
+        // ======================================
+
+        input.value = "";
+
+        input.style.height =
+            "auto";
+
+        if (
+            this.elements.charCounter
+        ) {
+
+            this.elements
+                .charCounter
+                .textContent = "0";
+        }
+
+        if (
+            this.elements.sendBtn
+        ) {
+
+            this.elements
+                .sendBtn
+                .disabled = true;
+        }
+
+
+        // ======================================
+        // Show loading
+        // ======================================
+
+        State.isProcessing =
+            true;
+
+        if (
+            this.elements
+                .loadingIndicator
+        ) {
+
+            this.elements
+                .loadingIndicator
+                .classList
+                .remove("hidden");
+        }
+
+        this.scrollToBottom();
+
+
+        try {
+
+            // ==================================
+            // Call FastAPI backend
+            // ==================================
+
+            const response =
+                await API.queryRAG(
+                    query
+                );
+
+
+            // ==================================
+            // Add assistant response
+            // ==================================
+
+            State.addMessage(
+                "assistant",
+                response.answer ||
+                    "No response generated.",
+                {
+                    thought_process:
+                        response.thought_process ||
+                        [],
+
+                    sources:
+                        response.sources ||
+                        [],
+
+                    status:
+                        response.status ||
+                        "Completed"
+                }
+            );
+
+
+            this.renderMessages();
+
+            this.showToast(
+                "Response generated",
+                "success"
+            );
+
+
+        } catch (error) {
+
+            console.error(
+                "Query failed:",
+                error
+            );
+
+            State.addMessage(
+                "assistant",
+                `⚠️ **Error**: ${error.message}. Please try again.`,
+                {
+                    status: "error"
+                }
+            );
+
+            this.renderMessages();
+
+            this.showToast(
+                "Request failed",
+                "error"
+            );
+
+
+        } finally {
+
+            State.isProcessing =
+                false;
+
+            if (
+                this.elements
+                    .loadingIndicator
+            ) {
+
+                this.elements
+                    .loadingIndicator
+                    .classList
+                    .add("hidden");
+            }
+
+            if (
+                this.elements.sendBtn
+            ) {
+
+                this.elements
+                    .sendBtn
+                    .disabled = false;
+            }
+
+            input.focus();
+
+            this.scrollToBottom();
+        }
+    },
+
+
+    // ======================================
+    // RENDER MESSAGES
+    // ======================================
+
+    renderMessages() {
+
+        const {
+            messagesList,
+            welcomeScreen
+        } = this.elements;
+
+        if (
+            !messagesList ||
+            !welcomeScreen
+        ) {
+            return;
+        }
+
+        messagesList.innerHTML = "";
+
+
+        if (
+            State.messages.length === 0
+        ) {
+
+            welcomeScreen.classList
+                .remove("hidden");
+
+            return;
+        }
+
+
+        welcomeScreen.classList
+            .add("hidden");
+
+
+        State.messages.forEach(
+            (msg) => {
+
+                const msgEl =
+                    document.createElement(
+                        "div"
+                    );
+
+                msgEl.className =
+                    `message ${msg.role}`;
+
+
+                const avatar =
+                    msg.role ===
+                    "assistant"
+                        ? "◈"
+                        : "👤";
+
+
+                const time =
+                    new Date(
+                        msg.timestamp
+                    ).toLocaleTimeString(
+                        [],
+                        {
+                            hour: "2-digit",
+                            minute: "2-digit"
+                        }
+                    );
+
+
+                let contentHtml = "";
+
+
+                // ==================================
+                // Assistant message
+                // ==================================
+
+                if (
+                    msg.role ===
+                    "assistant"
+                ) {
+
+                    // Execution timeline
+                    if (
+                        msg.thought_process &&
+                        msg.thought_process
+                            .length > 0
+                    ) {
+
+                        contentHtml +=
+                            this.renderThoughtProcess(
+                                msg.thought_process,
+                                msg.status
+                            );
+                    }
+
+
+                    // Markdown
+                    const rawHtml =
+                        typeof marked !==
+                        "undefined"
+                            ? marked.parse(
+                                  msg.content
+                              )
+                            : this.escapeHtml(
+                                  msg.content
+                              );
+
+
+                    const cleanHtml =
+                        typeof DOMPurify !==
+                        "undefined"
+                            ? DOMPurify.sanitize(
+                                  rawHtml
+                              )
+                            : rawHtml;
+
+
+                    contentHtml += `
+                        <div class="markdown-body">
+                            ${cleanHtml}
+                        </div>
+                    `;
+
+
+                    // Sources
+                    if (
+                        msg.sources &&
+                        msg.sources.length > 0
+                    ) {
+
+                        contentHtml +=
+                            this.renderSources(
+                                msg.sources
+                            );
+                    }
+
+
+                } else {
+
+                    const rawHtml =
+                        typeof marked !==
+                        "undefined"
+                            ? marked.parse(
+                                  msg.content
+                              )
+                            : this.escapeHtml(
+                                  msg.content
+                              );
+
+
+                    const cleanHtml =
+                        typeof DOMPurify !==
+                        "undefined"
+                            ? DOMPurify.sanitize(
+                                  rawHtml
+                              )
+                            : rawHtml;
+
+
+                    contentHtml = `
+                        <div class="markdown-body">
+                            ${cleanHtml}
+                        </div>
+                    `;
+                }
+
+
+                // ==================================
+                // Message HTML
+                // ==================================
+
+                msgEl.innerHTML = `
+
+                    <div class="message-avatar">
+                        ${avatar}
+                    </div>
+
+                    <div class="message-content">
+
+                        <div class="message-bubble">
+
+                            ${contentHtml}
+
+                        </div>
+
+                        <div class="message-meta">
+
+                            <span>
+                                ${time}
+                            </span>
+
+                            <button
+                                class="copy-btn"
+                                onclick="UI.copyToClipboard('${msg.id}')"
+                                aria-label="Copy message"
+                            >
+
+                                <svg
+                                    width="14"
+                                    height="14"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    stroke-width="2"
+                                >
+                                    <rect
+                                        x="9"
+                                        y="9"
+                                        width="13"
+                                        height="13"
+                                        rx="2"
+                                    ></rect>
+
+                                    <path
+                                        d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+                                    ></path>
+                                </svg>
+
+                                Copy
+
+                            </button>
+
+                        </div>
+
+                    </div>
+                `;
+
+
+                messagesList.appendChild(
+                    msgEl
+                );
+            }
+        );
+
+
+        // ======================================
+        // Highlight code
+        // ======================================
+
+        if (
+            typeof hljs !==
+            "undefined"
+        ) {
+
+            document
+                .querySelectorAll(
+                    "pre code"
+                )
+                .forEach(
+                    (block) => {
+
+                        try {
+                            hljs.highlightElement(
+                                block
+                            );
+                        } catch (err) {
+                            console.warn(
+                                "Syntax highlighting failed:",
+                                err
+                            );
+                        }
+                    }
+                );
+        }
+
+
+        // ======================================
+        // Code block copy buttons
+        // ======================================
+
+        document
+            .querySelectorAll(
+                "pre"
+            )
+            .forEach((pre) => {
+
+                // Prevent duplicate headers
+                if (
+                    pre.previousElementSibling &&
+                    pre.previousElementSibling
+                        .classList
+                        .contains(
+                            "code-block-header"
+                        )
+                ) {
+                    return;
+                }
+
+
+                const code =
+                    pre.querySelector(
+                        "code"
+                    );
+
+                if (!code) {
+                    return;
+                }
+
+
+                const language =
+                    code.className
+                        .replace(
+                            "hljs language-",
+                            ""
+                        )
+                        .replace(
+                            "language-",
+                            ""
+                        )
+                        .toUpperCase() ||
+                    "CODE";
+
+
+                const header =
+                    document.createElement(
+                        "div"
+                    );
+
+                header.className =
+                    "code-block-header";
+
+
+                header.innerHTML = `
+
+                    <span>
+                        ${this.escapeHtml(
+                            language
+                        )}
+                    </span>
+
+                    <button
+                        onclick="UI.copyCode(this)"
+                    >
+                        Copy
+                    </button>
+
+                `;
+
+
+                pre.parentNode.insertBefore(
+                    header,
+                    pre
+                );
+
+                header.appendChild(
+                    pre
+                );
+            });
+
+
+        this.scrollToBottom();
+    },
+
+
+    // ======================================
+    // EXECUTION TIMELINE
+    // ======================================
+
+    renderThoughtProcess(
+        process,
+        status
+    ) {
+
+        const isComplete =
+            status === "Completed" ||
+            status === "completed";
+
+
+        let html = `
+
+            <div class="thought-process">
+
+                <div class="thought-process-title">
+
+                    <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                    >
+
+                        <circle
+                            cx="12"
+                            cy="12"
+                            r="10"
+                        ></circle>
+
+                        <polyline
+                            points="12 6 12 12 16 14"
+                        ></polyline>
+
+                    </svg>
+
+                    Execution Timeline
+
+                </div>
+
+                <div class="timeline">
+
+        `;
+
+
+        process.forEach(
+            (step, index) => {
+
+                const isLast =
+                    index ===
+                    process.length - 1;
+
+
+                const stateClass =
+                    isComplete
+                        ? "completed"
+                        : isLast
+                            ? "active"
+                            : "completed";
+
+
+                const icon =
+                    isComplete
+                        ? "✓"
+                        : isLast
+                            ? "●"
+                            : "○";
+
+
+                html += `
+
+                    <div
+                        class="timeline-item ${stateClass}"
+                    >
+
+                        <span class="timeline-icon">
+                            ${icon}
+                        </span>
+
+                        <span>
+                            ${this.escapeHtml(
+                                String(step)
+                            )}
+                        </span>
+
+                    </div>
+
+                `;
+            }
+        );
+
+
+        html += `
+
+                </div>
+
+            </div>
+
+        `;
+
+
+        return html;
+    },
+
+
+    // ======================================
+    // SOURCES
+    // ======================================
+
+    renderSources(sources) {
+
+        const normalizedSources =
+            sources.map((s) => {
+
+                if (
+                    typeof s ===
+                    "string"
+                ) {
+
+                    return {
+                        name: "Document",
+                        content: s,
+                        type: "text"
+                    };
+                }
+
+
+                return {
+
+                    name:
+                        s.metadata?.source ||
+                        s.metadata?.title ||
+                        "Unknown Source",
+
+                    content:
+                        s.page_content ||
+                        s.content ||
+                        JSON.stringify(s),
+
+                    type:
+                        s.metadata?.type ||
+                        "document"
+                };
+            });
+
+
+        let html = `
+
+            <div class="sources-section">
+
+                <button
+                    class="sources-toggle"
+                    onclick="
+                        this.nextElementSibling
+                            .classList
+                            .toggle('hidden')
+                    "
+                >
+
+                    <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                    >
+
+                        <polyline
+                            points="6 9 12 15 18 9"
+                        ></polyline>
+
+                    </svg>
+
+                    ${normalizedSources.length}
+                    Source(s) Retrieved
+
+                </button>
+
+                <div class="sources-list hidden">
+
+        `;
+
+
+        normalizedSources.forEach(
+            (src) => {
+
+                const content =
+                    String(
+                        src.content || ""
+                    );
+
+
+                html += `
+
+                    <div class="source-card">
+
+                        <div class="source-header">
+
+                            <span class="source-name">
+                                ${this.escapeHtml(
+                                    src.name
+                                )}
+                            </span>
+
+                            <span class="source-type">
+                                ${this.escapeHtml(
+                                    src.type
+                                )}
+                            </span>
+
+                        </div>
+
+                        <div class="source-preview">
+
+                            ${this.escapeHtml(
+                                content.substring(
+                                    0,
+                                    150
+                                )
+                            )}${content.length > 150 ? "..." : ""}
+
+                        </div>
+
+                    </div>
+
+                `;
+            }
+        );
+
+
+        html += `
+
+                </div>
+
+            </div>
+
+        `;
+
+
+        return html;
+    },
+
+
+    // ======================================
+    // HTML ESCAPING
+    // ======================================
+
+    escapeHtml(text) {
+
+        const div =
+            document.createElement(
+                "div"
+            );
+
+        div.textContent =
+            String(text ?? "");
+
+        return div.innerHTML;
+    },
+
+
+    // ======================================
+    // COPY MESSAGE
+    // ======================================
+
+    copyToClipboard(msgId) {
+
+        const msg =
+            State.messages.find(
+                (m) =>
+                    m.id === msgId
+            );
+
+        if (!msg) {
+            return;
+        }
+
+
+        navigator.clipboard
+            .writeText(msg.content)
+            .then(() => {
+
+                this.showToast(
+                    "Copied to clipboard",
+                    "success"
+                );
+
+            })
+            .catch((err) => {
+
+                console.error(
+                    "Clipboard error:",
+                    err
+                );
+
+                this.showToast(
+                    "Failed to copy",
+                    "error"
+                );
+            });
+    },
+
+
+    // ======================================
+    // COPY CODE
+    // ======================================
+
+    copyCode(btn) {
+
+        if (!btn) {
+            return;
+        }
+
+
+        const header =
+            btn.parentElement;
+
+        const pre =
+            header.querySelector(
+                "pre"
+            ) ||
+            header.nextElementSibling;
+
+
+        if (!pre) {
+            return;
+        }
+
+
+        const code =
+            pre.querySelector(
+                "code"
+            );
+
+
+        if (!code) {
+            return;
+        }
+
+
+        navigator.clipboard
+            .writeText(
+                code.textContent
+            )
+            .then(() => {
+
+                const original =
+                    btn.textContent;
+
+                btn.textContent =
+                    "Copied!";
+
+                setTimeout(
+                    () =>
+                        (btn.textContent =
+                            original),
+                    2000
+                );
+
+                this.showToast(
+                    "Code copied",
+                    "success"
+                );
+
+            })
+            .catch((err) => {
+
+                console.error(
+                    "Clipboard error:",
+                    err
+                );
+
+                this.showToast(
+                    "Failed to copy code",
+                    "error"
+                );
+            });
+    },
+
+
+    // ======================================
+    // SCROLL
+    // ======================================
+
+    scrollToBottom() {
+
+        setTimeout(() => {
+
+            if (
+                this.elements
+                    .chatContainer
+            ) {
+
+                this.elements
+                    .chatContainer
+                    .scrollTop =
+                    this.elements
+                        .chatContainer
+                        .scrollHeight;
+            }
+
+        }, 50);
+    },
+
+
+    // ======================================
+    // CONNECTION STATUS
+    // ======================================
+
+    updateConnectionStatus(
+        isOnline
+    ) {
+
+        const el =
+            document.getElementById(
+                "connection-status"
+            );
+
+        if (!el) {
+            return;
+        }
+
+
+        if (isOnline) {
+
+            el.innerHTML =
+                '<span class="dot"></span> Connected';
+
+            el.style.color =
+                "var(--success)";
+
+        } else {
+
+            el.innerHTML =
+                '<span class="dot" style="background-color: var(--error)"></span> Disconnected';
+
+            el.style.color =
+                "var(--error)";
+        }
+    },
+
+
+    // ======================================
+    // THREAD ID
+    // ======================================
+
+    updateThreadIdDisplay() {
+
+        if (
+            this.elements
+                .currentThreadIdDisplay
+        ) {
+
+            this.elements
+                .currentThreadIdDisplay
+                .textContent =
+                State.threadId;
+        }
+    },
+
+
+    // ======================================
+    // TOAST
+    // ======================================
+
+    showToast(
+        message,
+        type = "info"
+    ) {
+
+        if (
+            !this.elements
+                .toastContainer
+        ) {
+            return;
+        }
+
+
+        const toast =
+            document.createElement(
+                "div"
+            );
+
+        toast.className =
+            `toast ${type}`;
+
+
+        const icons = {
+
+            success: "✓",
+
+            error: "✕",
+
+            info: "ℹ",
+
+            warning: "⚠"
+        };
+
+
+        toast.innerHTML = `
+
+            <span>
+                ${icons[type] || "ℹ"}
+            </span>
+
+            ${this.escapeHtml(
+                message
+            )}
+
+        `;
+
+
+        this.elements
+            .toastContainer
+            .appendChild(
+                toast
+            );
+
+
+        setTimeout(() => {
+
+            toast.style.opacity =
+                "0";
+
+            toast.style.transform =
+                "translateX(100%)";
+
+
+            setTimeout(
+                () =>
+                    toast.remove(),
+                300
+            );
+
+        }, 3000);
+    }
+};
+
+
+// ==========================================
+// 4. INITIALIZE APP
+// ==========================================
+
+document.addEventListener(
+    "DOMContentLoaded",
+    () => {
+
+        UI.init();
+
+    }
+);
